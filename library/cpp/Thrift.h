@@ -21,7 +21,6 @@
 #define _SANDESH_THRIFT_H_ 1
 
 
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -39,12 +38,12 @@
 /**
  * CONTRAIL-CUSTOM
  */
-#ifndef _WINDOWS
+#ifndef _WIN32
 #include <netinet/in.h>
 #include <sys/socket.h>
 #else
-#include "winutils.h"
-#include<ctime>
+#include <winutils.h>
+#include <time.h>
 #endif
 
 #include <string>
@@ -94,14 +93,13 @@ class TEnumIterator : public std::iterator<std::forward_iterator_tag, std::pair<
     return ++ii_;
   }
 
-bool operator == (const TEnumIterator& end) 
-{ 
-	return !(operator !=(end));
-}
-
   bool operator !=(const TEnumIterator& end) {
     assert(end.n_ == -1);
     return (ii_ != n_);
+  }
+
+  bool operator ==(const TEnumIterator& end) {
+    return !(operator !=(end));
   }
 
   std::pair<int, const char*> operator*() const {

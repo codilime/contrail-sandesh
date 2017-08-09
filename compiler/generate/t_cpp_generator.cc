@@ -21,7 +21,6 @@
  * details.
  */
 
-
 #include <cassert>
 
 #include <fstream>
@@ -547,10 +546,8 @@ void t_cpp_generator::init_generator() {
   // Include the types file
 #ifdef SANDESH
   f_types_impl_ <<
-#ifdef _WINDOWS
-	  //winsock2 compatibility issues
-     "#include <SDKDDKVer.h>" <<endl <<
-     "#include<boost/asio.hpp>" <<endl<<endl<<
+#ifdef _WIN32
+    "#define WIN32_LEAN_AND_MEAN" << endl << endl <<
 #endif
     "#include <boost/date_time/posix_time/posix_time.hpp>" << endl << endl <<
     "#include <base/logging.h>" << endl << endl <<
@@ -798,8 +795,8 @@ void t_cpp_generator::generate_consts(std::vector<t_const*> consts) {
 
 #ifdef SANDESH
   f_consts_impl <<
-#ifdef _WINDOWS
-     "#include <boost/asio.hpp>" <<endl<<
+#ifdef _WIN32
+    "#define WIN32_LEAN_AND_MEAN" << endl << endl <<
 #endif
     "#include <base/trace.h>" << endl <<
     "#include <sandesh/sandesh_types.h>" << endl <<

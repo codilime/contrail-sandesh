@@ -26,5 +26,4 @@ buffer sandesh BufferTest {
 }
 
 buffer sandesh BufferUpdateTest {
-1: u16 dummymember;
 }

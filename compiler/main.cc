@@ -41,9 +41,10 @@
 #include <errno.h>
 #include <limits.h>
 
-#if defined(MINGW) || defined(_WINDOWS)
-# include <windows.h> /* for GetFullPathName */
+#ifdef _WIN32
+#include <Windows.h> /* for GetFullPathName */
 #define PATH_MAX (MAX_PATH)
+#define strtok_r strtok_s
 #endif
 
 // Careful: must include globals first for extern definitions
@@ -226,7 +227,7 @@ bool gen_recurse = false;
  * otherwise this just calls through to realpath
  */
 char *saferealpath(const char *path, char *resolved_path) {
-#if defined(MINGW) || defined(_WINDOWS)
+#ifdef _WIN32
   char buf[MAX_PATH];
   char* basename;
   DWORD len = GetFullPathName(path, MAX_PATH, buf, &basename);
@@ -1111,11 +1112,7 @@ int main(int argc, char** argv) {
     char* arg;
 
     char *saveptr;
-#ifdef _WINDOWS
-	arg = strtok_s(argv[i], " ", &saveptr);
-#else
-	arg = strtok_r(argv[i], " ", &saveptr);
-#endif
+    arg = strtok_r(argv[i], " ", &saveptr);
     while (arg != NULL) {
       // Treat double dashes as single dashes
       if (arg[0] == '-' && arg[1] == '-') {
@@ -1210,43 +1207,36 @@ int main(int argc, char** argv) {
           usage();
         }
         g_incl_searchpath.push_back(arg);
-	  }
-	  else if ((strcmp(arg, "-o") == 0) || (strcmp(arg, "-out") == 0)) {
-		  out_path_is_absolute = (strcmp(arg, "-out") == 0) ? true : false;
+      } else if ((strcmp(arg, "-o") == 0) || (strcmp(arg, "-out") == 0)) {
+        out_path_is_absolute = (strcmp(arg, "-out") == 0) ? true : false;
+		  
+		arg = argv[++i];
+        if (arg == NULL) {
+          fprintf(stderr, "-o: missing output directory\n");
+          usage();
+        }
+        out_path = arg;
 
-		  arg = argv[++i];
-		  if (arg == NULL) {
-			  fprintf(stderr, "-o: missing output directory\n");
-			  usage();
-		  }
-		  out_path = arg;
+#ifdef _WIN32
+        //strip out trailing \ on Windows
+        int last = out_path.length()-1;
+        if (out_path[last] == '\\')
+        {
+          out_path.erase(last);
+        }
+#endif
 
-#if defined(MINGW) || defined(_WINDOWS)
-		  //strip out trailing \ on Windows
-		  int last = out_path.length() - 1;
-		  if (out_path[last] == '\\')
-		  {
-			  out_path.erase(last);
-		  }
-		  DWORD fa = GetFileAttributesA(out_path.c_str());
-		  if (fa == INVALID_FILE_ATTRIBUTES)
-		  {
-			  fprintf(stderr, "Output directory %s is unusable: %d\n", out_path.c_str(), GetLastError());
-			  return -1;
-		  }
-
-		  if (!(fa & FILE_ATTRIBUTE_DIRECTORY))
-		  {
-			  fprintf(stderr, "Output directory %s exists but is not a directory\n", out_path.c_str()); return -1;
-		  }
-	  }
-		else {
-			fprintf(stderr, "!!! Unrecognized option: %s\n", arg);
-			usage();
-		     }
-	  arg = strtok_s(NULL, " ", &saveptr);
+#ifdef _WIN32
+        DWORD fa = GetFileAttributesA(out_path.c_str());
+        if (fa == INVALID_FILE_ATTRIBUTES) {
+          fprintf(stderr, "Output directory %s is unusable: error nr %d\n", out_path.c_str(), GetLastError());
+          return -1;
+        }
+        if (! (fa & FILE_ATTRIBUTE_DIRECTORY)) {
+          fprintf(stderr, "Output directory %s exists but is not a directory\n", out_path.c_str());
+          return -1;
+        }
 #else
-
         struct stat sb;
         if (stat(out_path.c_str(), &sb) < 0) {
           fprintf(stderr, "Output directory %s is unusable: %s\n", out_path.c_str(), strerror(errno));
@@ -1256,6 +1246,7 @@ int main(int argc, char** argv) {
           fprintf(stderr, "Output directory %s exists but is not a directory\n", out_path.c_str());
           return -1;
         }
+#endif
       } else {
         fprintf(stderr, "!!! Unrecognized option: %s\n", arg);
         usage();
@@ -1263,7 +1254,6 @@ int main(int argc, char** argv) {
 
       // Tokenize more
       arg = strtok_r(NULL, " ", &saveptr);
-#endif
     }
   }
 

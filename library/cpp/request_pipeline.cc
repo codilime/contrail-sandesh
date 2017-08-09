@@ -15,8 +15,9 @@
 //
 // - The StageWorker class is a Task which runs the Client's callback functions
 //
-#ifdef _WINDOWS
-#include <boost/asio.hpp>
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
 #endif
 #include <boost/utility.hpp>
 #include <utility>

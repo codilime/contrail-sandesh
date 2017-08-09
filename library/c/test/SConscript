@@ -49,7 +49,6 @@ SandeshLibs = ['gunit',
                'pugixml',
                ]
 
-
 if env.UseSystemTBB():
     SandeshLibs.append('tbb')
 else:

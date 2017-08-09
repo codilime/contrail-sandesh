@@ -19,10 +19,6 @@
 
 #include "sandesh.h"
 
-#ifdef _WINDOWS
-unsigned short _fltused = 0;
-#endif
-
 int32_t thrift_binary_protocol_write_string(ThriftProtocol *, const char *, int *);
 int32_t thrift_binary_protocol_write_binary(ThriftProtocol *, const void *,
         const u_int32_t, int *);
@@ -949,7 +945,7 @@ int32_t
 thrift_binary_protocol_read_double (ThriftProtocol *protocol,
                                     double *value, int *error)
 {
-#if !defined(__KERNEL__) && !defined(_NTKERNEL)
+#ifndef __KERNEL__
   int32_t ret;
   union {
     void * b[8];
