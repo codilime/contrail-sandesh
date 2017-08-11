@@ -1,3 +1,13 @@
+/*
+ * Copyright (c) 2017 Juniper Networks, Inc. All rights reserved.
+ */
+
+//
+// win_kernel_mem.h
+//
+// Memory management functions for Windows Drivers
+//
+
 #include <Ndis.h>
 
 #define SxExtAllocationSandeshTag 'DNAS'

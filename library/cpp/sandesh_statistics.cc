@@ -6,9 +6,11 @@
 // sandesh_statistics.cc
 // Sandesh Statistics Implementation
 //
-#ifdef _WINDOWS
-#include <boost/asio.hpp>
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
 #endif
+
 #include <boost/foreach.hpp>
 
 #include <sandesh/sandesh_types.h>

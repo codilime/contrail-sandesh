@@ -20,12 +20,12 @@
 #ifndef _SANDESH_THRIFT_H_
 #define _SANDESH_THRIFT_H_ 1
 
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
 #include <stdio.h>
 #include <assert.h>
+#include <ctime>
 
 #include <sys/types.h>
 #ifdef HAVE_NETINET_IN_H
@@ -43,7 +43,6 @@
 #include <sys/socket.h>
 #else
 #include <winutils.h>
-#include <time.h>
 #endif
 
 #include <string>

@@ -1,9 +1,11 @@
 /*
  * Copyright (c) 2014 Juniper Networks, Inc. All rights reserved.
  */
-#ifdef _WINDOWS
-#include <boost/asio.hpp>
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
 #endif
+
 #include <sandesh/sandesh_message_builder.h>
 
 using namespace pugi;
