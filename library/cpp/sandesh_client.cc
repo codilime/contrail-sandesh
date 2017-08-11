@@ -14,6 +14,7 @@
 
 #include <boost/bind.hpp>
 #include <boost/assign.hpp>
+#include <boost/foreach.hpp>
 
 #include <base/task_annotations.h>
 #include <io/event_manager.h>
@@ -23,6 +24,7 @@
 #include <sandesh/sandesh_constants.h>
 #include <sandesh/sandesh_types.h>
 #include <sandesh/sandesh.h>
+#include <sandesh/sandesh_trace.h>
 #include <sandesh/sandesh_session.h>
 
 #include "sandesh_state_machine.h"
@@ -34,15 +36,15 @@
 #include <sandesh/common/vns_constants.h>
 #include "sandesh_client.h"
 #include "sandesh_uve.h"
+#include "sandesh_util.h"
 
+using boost::asio::ip::address;
 using namespace boost::asio;
 using boost::system::error_code;
 using std::string;
 using std::map;
 using std::make_pair;
 using std::vector;
-
-using boost::system::error_code;
 
 const std::string SandeshClient::kSMTask = "sandesh::SandeshClientSM";
 const std::string SandeshClient::kSessionWriterTask = "sandesh::SandeshClientSession";
@@ -58,21 +60,20 @@ const std::vector<Sandesh::QueueWaterMarkInfo>
                                                (2500, SandeshLevel::INVALID, false, false);
 
 SandeshClient::SandeshClient(EventManager *evm,
-        Endpoint primary, Endpoint secondary, Sandesh::CollectorSubFn csf, bool periodicuve)
-    :   TcpServer(evm),
+        const std::vector<Endpoint> &collectors,
+        const SandeshConfig &config,
+        bool periodicuve)
+    :   SslServer(evm, boost::asio::ssl::context::tlsv1_client,
+                  config.sandesh_ssl_enable),
         sm_task_instance_(kSMTaskInstance),
         sm_task_id_(TaskScheduler::GetInstance()->GetTaskId(kSMTask)),
         session_task_instance_(kSessionTaskInstance),
         session_writer_task_id_(TaskScheduler::GetInstance()->GetTaskId(kSessionWriterTask)),
         session_reader_task_id_(TaskScheduler::GetInstance()->GetTaskId(kSessionReaderTask)),
-        primary_(primary),
-        secondary_(secondary),
-        csf_(csf),
+        dscp_value_(0),
+        collectors_(collectors),
         sm_(SandeshClientSM::CreateClientSM(evm, this, sm_task_instance_, sm_task_id_, periodicuve)),
         session_wm_info_(kSessionWaterMarkInfo) {
-    SANDESH_LOG(INFO,"primary  " << primary_);
-    SANDESH_LOG(INFO,"secondary  " << secondary_);
-
     // Set task policy for exclusion between state machine and session tasks since
     // session delete happens in state machine task
     if (!task_policy_set_) {
@@ -82,39 +83,74 @@ SandeshClient::SandeshClient(EventManager *evm,
         TaskScheduler::GetInstance()->SetPolicy(sm_task_id_, sm_task_policy);
         task_policy_set_ = true;
     }
+    if (config.sandesh_ssl_enable) {
+        boost::asio::ssl::context *ctx = context();
+        boost::system::error_code ec;
+        ctx->set_options(boost::asio::ssl::context::default_workarounds |
+                         boost::asio::ssl::context::no_sslv3 |
+                         boost::asio::ssl::context::no_sslv2, ec);
+        if (ec.value() != 0) {
+            SANDESH_LOG(ERROR, "Error setting ssl options: " << ec.message());
+            exit(EINVAL);
+        }
+        // CA certificate
+        if (!config.ca_cert.empty()) {
+            // Verify that the peer certificate is signed by a trusted CA
+            ctx->set_verify_mode(boost::asio::ssl::verify_peer |
+                                 boost::asio::ssl::verify_fail_if_no_peer_cert,
+                                 ec);
+            if (ec.value() != 0) {
+                SANDESH_LOG(ERROR, "Error setting verification mode: " <<
+                            ec.message());
+                exit(EINVAL);
+            }
+            ctx->load_verify_file(config.ca_cert, ec);
+            if (ec.value() != 0) {
+                SANDESH_LOG(ERROR, "Error loading CA certificate: " <<
+                            ec.message());
+                exit(EINVAL);
+            }
+        }
+        // Server certificate
+        ctx->use_certificate_chain_file(config.certfile, ec);
+        if (ec.value() != 0) {
+            SANDESH_LOG(ERROR, "Error using server certificate: " <<
+                        ec.message());
+            exit(EINVAL);
+        }
+        // Server private key
+        ctx->use_private_key_file(config.keyfile,
+                                  boost::asio::ssl::context::pem, ec);
+        if (ec.value() != 0) {
+            SANDESH_LOG(ERROR, "Error using server private key file: " <<
+                        ec.message());
+            exit(EINVAL);
+        }
+    }
 }
 
 SandeshClient::~SandeshClient() {}
 
-void SandeshClient::CollectorHandler(std::vector<DSResponse> resp) {
+void SandeshClient::ReConfigCollectors(
+        const std::vector<std::string>& collector_list) {
+    std::vector<Endpoint> collector_endpoints;
 
-    Endpoint primary = Endpoint();
-    Endpoint secondary = Endpoint();
-    
-    if (resp.size()>=1) {
-        primary = resp[0].ep;
-        SANDESH_LOG(INFO, "DiscUpdate for primary " << primary);
+    BOOST_FOREACH(const std::string& collector, collector_list) {
+        Endpoint ep;
+        if (!MakeEndpoint(&ep, collector)) {
+            SANDESH_LOG(ERROR, __func__ << ": Invalid collector address: " <<
+                        collector);
+            return;
+        }
+        collector_endpoints.push_back(ep);
     }
-    if (resp.size()>=2) {
-        secondary = resp[1].ep;
-        SANDESH_LOG(INFO, "DiscUpdate for secondary " << secondary);
-    }
-    if (primary!=Endpoint()) {
-        sm_->SetCandidates(primary, secondary);
-    }
+    sm_->SetCollectors(collector_endpoints);
 }
 
 void SandeshClient::Initiate() {
     sm_->SetAdminState(false);
-    if (primary_ != Endpoint())
-        sm_->SetCandidates(primary_,secondary_);
-    // subscribe for the collector service only if the collector list
-    // is not provided by the generator.
-    else if (csf_ != 0) {
-        SANDESH_LOG(INFO, "Subscribe to Discovery Service for Collector" );
-        csf_(g_vns_constants.COLLECTOR_DISCOVERY_SERVICE_NAME, 2,
-            boost::bind(&SandeshClient::CollectorHandler, this, _1));
-    }
+    if (collectors_.size())
+        sm_->SetCollectors(collectors_);
 }
 
 void SandeshClient::Shutdown() {
@@ -214,7 +250,7 @@ SandeshSession *SandeshClient::CreateSMSession(
         TcpSession::EventObserver eocb,
         SandeshReceiveMsgCb rmcb,
         TcpServer::Endpoint ep) {
-    TcpSession *session = TcpServer::CreateSession();
+    TcpSession *session = SslServer::CreateSession();
     Socket *socket = session->socket();
 
     error_code ec;
@@ -229,6 +265,9 @@ SandeshSession *SandeshClient::CreateSMSession(
         SANDESH_LOG(ERROR, __func__ << " Unable to set socket options: " << ec.message());
         DeleteSession(session);
         return NULL;
+    }
+    if (dscp_value_) {
+        session->SetDscpSocketOption(dscp_value_);
     }
     SandeshSession *sandesh_session =
             static_cast<SandeshSession *>(session);
@@ -267,7 +306,8 @@ static uint64_t client_start_time;
 
 void SandeshClient::SendUVE(int count,
         const string & stateName, const string & server,
-        Endpoint primary, Endpoint secondary) {
+        const Endpoint & server_ip,
+        const std::vector<TcpServer::Endpoint> & collector_eps) {
     ModuleClientState mcs;
     mcs.set_name(Sandesh::source() + ":" + Sandesh::node_type() +
         ":" + Sandesh::module() + ":" + Sandesh::instance_id());
@@ -276,18 +316,22 @@ void SandeshClient::SendUVE(int count,
         client_start_time = UTCTimestampUsec(); 
         client_start = true;
     }
-    std::ostringstream pri,sec;
-    pri << primary;
-    sec << secondary;
-
     sci.set_start_time(client_start_time);
     sci.set_successful_connections(count);
     sci.set_pid(getpid());
     sci.set_http_port(Sandesh::http_port());
     sci.set_status(stateName);
     sci.set_collector_name(server);
-    sci.set_primary(pri.str());
-    sci.set_secondary(sec.str());
+    std::ostringstream collector_ip;
+    collector_ip << server_ip;
+    sci.set_collector_ip(collector_ip.str());
+    std::vector<std::string> collectors;
+    BOOST_FOREACH(const TcpServer::Endpoint& ep, collector_eps) {
+        std::ostringstream collector_ip;
+        collector_ip << ep;
+        collectors.push_back(collector_ip.str());
+    }
+    sci.set_collector_list(collectors);
     // Sandesh client socket statistics
     SocketIOStats rx_stats;
     GetRxSocketStats(rx_stats);
@@ -326,6 +370,10 @@ void SandeshClient::SendUVE(int count,
              magg_stats.get_messages_sent_dropped_validation_failed()));
     csev.insert(make_pair("dropped_rate_limited",
              magg_stats.get_messages_sent_dropped_rate_limited()));
+    csev.insert(make_pair("dropped_sending_disabled",
+             magg_stats.get_messages_sent_dropped_sending_disabled()));
+    csev.insert(make_pair("dropped_sending_to_syslog",
+             magg_stats.get_messages_sent_dropped_sending_to_syslog()));
     mcs.set_tx_msg_agg(csev);
 
     map <string,SandeshMessageStats> csevm;
@@ -334,18 +382,32 @@ void SandeshClient::SendUVE(int count,
         SandeshMessageStats res_sms;
         const SandeshMessageStats& src_sms = smit->get_stats();
         res_sms.set_messages_sent(src_sms.get_messages_sent());
-        res_sms.set_messages_sent_dropped_no_queue(src_sms.get_messages_sent_dropped_no_queue());
-        res_sms.set_messages_sent_dropped_no_client(src_sms.get_messages_sent_dropped_no_client());
-        res_sms.set_messages_sent_dropped_no_session(src_sms.get_messages_sent_dropped_no_session());
-        res_sms.set_messages_sent_dropped_queue_level(src_sms.get_messages_sent_dropped_queue_level());
-        res_sms.set_messages_sent_dropped_client_send_failed(src_sms.get_messages_sent_dropped_client_send_failed());
-        res_sms.set_messages_sent_dropped_session_not_connected(src_sms.get_messages_sent_dropped_session_not_connected());
-        res_sms.set_messages_sent_dropped_header_write_failed(src_sms.get_messages_sent_dropped_header_write_failed());
-        res_sms.set_messages_sent_dropped_write_failed(src_sms.get_messages_sent_dropped_write_failed());
-        res_sms.set_messages_sent_dropped_wrong_client_sm_state(src_sms.get_messages_sent_dropped_wrong_client_sm_state());
-        res_sms.set_messages_sent_dropped_validation_failed(src_sms.get_messages_sent_dropped_validation_failed());
-        res_sms.set_messages_sent_dropped_rate_limited(src_sms.get_messages_sent_dropped_rate_limited());
-      
+        res_sms.set_messages_sent_dropped_no_queue(
+            src_sms.get_messages_sent_dropped_no_queue());
+        res_sms.set_messages_sent_dropped_no_client(
+            src_sms.get_messages_sent_dropped_no_client());
+        res_sms.set_messages_sent_dropped_no_session(
+            src_sms.get_messages_sent_dropped_no_session());
+        res_sms.set_messages_sent_dropped_queue_level(
+            src_sms.get_messages_sent_dropped_queue_level());
+        res_sms.set_messages_sent_dropped_client_send_failed(
+            src_sms.get_messages_sent_dropped_client_send_failed());
+        res_sms.set_messages_sent_dropped_session_not_connected(
+            src_sms.get_messages_sent_dropped_session_not_connected());
+        res_sms.set_messages_sent_dropped_header_write_failed(
+            src_sms.get_messages_sent_dropped_header_write_failed());
+        res_sms.set_messages_sent_dropped_write_failed(
+            src_sms.get_messages_sent_dropped_write_failed());
+        res_sms.set_messages_sent_dropped_wrong_client_sm_state(
+            src_sms.get_messages_sent_dropped_wrong_client_sm_state());
+        res_sms.set_messages_sent_dropped_validation_failed(
+            src_sms.get_messages_sent_dropped_validation_failed());
+        res_sms.set_messages_sent_dropped_rate_limited(
+            src_sms.get_messages_sent_dropped_rate_limited());
+        res_sms.set_messages_sent_dropped_sending_disabled(
+            src_sms.get_messages_sent_dropped_sending_disabled());
+        res_sms.set_messages_sent_dropped_sending_to_syslog(
+            src_sms.get_messages_sent_dropped_sending_to_syslog());
         csevm.insert(make_pair(smit->get_message_type(), res_sms));
     }
     mcs.set_msg_type_agg(csevm);
@@ -375,8 +437,20 @@ void SandeshClient::GetSessionWaterMarkInfo(
     scwm_info = session_wm_info_;
 }
 
-TcpSession *SandeshClient::AllocSession(Socket *socket) {
+SslSession *SandeshClient::AllocSession(SslSocket *socket) {
     return new SandeshSession(this, socket, session_task_instance_, 
                               session_writer_task_id_,
                               session_reader_task_id_);
+}
+
+void SandeshClient::SetDscpValue(uint8_t value) {
+    if (value == dscp_value_)
+        return;
+
+    dscp_value_ = value;
+    SandeshSession *sess = session();
+    if (sess) {
+        sess->SetDscpSocketOption(value);
+    }
+
 }

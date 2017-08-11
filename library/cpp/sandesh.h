@@ -90,10 +90,12 @@
 #include <base/queue_task.h>
 #include <base/string_util.h>
 #include <base/time_util.h>
+#include <sandesh/sandesh_util.h>
 #include <sandesh/sandesh_types.h>
 #include <sandesh/protocol/TProtocol.h>
 #include <sandesh/transport/TBufferTransports.h>
-#include <discovery/client/discovery_client.h>
+#include <sandesh/sandesh_trace.h>
+#include <sandesh/sandesh_options.h>
 
 // Forward declaration
 class EventManager;
@@ -122,6 +124,7 @@ class SandeshMessageBasicStats;
 class SandeshConnection;
 class SandeshRequest;
 
+
 struct SandeshElement;
 
 class Sandesh {
@@ -142,8 +145,8 @@ public:
         };
     };
     typedef boost::tuple<size_t, SandeshLevel::type, bool, bool> QueueWaterMarkInfo;
-    typedef boost::function<void (std::string serviceName, uint8_t numbOfInstances,
-            DiscoveryServiceClient::ServiceHandler)> CollectorSubFn;
+    typedef std::map<std::string, std::map<std::string,std::string> > DerivedStats;
+
     // Initialization APIs
     static bool InitGenerator(const std::string &module,
             const std::string &source,
@@ -151,11 +154,10 @@ public:
             const std::string &instance_id,
             EventManager *evm,
             unsigned short http_port,
-            CollectorSubFn csf,
             const std::vector<std::string> &collectors,
             SandeshContext *client_context = NULL,
-            std::map<std::string, std::map<std::string,std::string> > ds = 
-                std::map<std::string, std::map<std::string,std::string> >());
+            DerivedStats ds = DerivedStats(),
+            const SandeshConfig &config = SandeshConfig());
     static bool InitGenerator(const std::string &module,
             const std::string &source, 
             const std::string &node_type,
@@ -163,8 +165,8 @@ public:
             EventManager *evm,
             unsigned short http_port,
             SandeshContext *client_context = NULL,
-            std::map<std::string, std::map<std::string,std::string> > ds = 
-                std::map<std::string, std::map<std::string,std::string> >());
+            DerivedStats ds = DerivedStats(),
+            const SandeshConfig &config = SandeshConfig());
     static void RecordPort(const std::string& name, const std::string& module,
             unsigned short port);
     // Collector
@@ -175,7 +177,8 @@ public:
             EventManager *evm,
             const std::string &collector_ip, int collector_port,
             unsigned short http_port,
-            SandeshContext *client_context = NULL);
+            SandeshContext *client_context = NULL,
+            const SandeshConfig &config = SandeshConfig());
     // Test
     static bool InitGeneratorTest(const std::string &module,
             const std::string &source,
@@ -183,14 +186,28 @@ public:
             const std::string &instance_id, 
             EventManager *evm,
             unsigned short http_port,
-            SandeshContext *client_context = NULL);
+            SandeshContext *client_context = NULL,
+            const SandeshConfig &config = SandeshConfig());
     static bool ConnectToCollector(const std::string &collector_ip,
             int collector_port, bool periodicuve = false);
+    static void ReConfigCollectors(const std::vector<std::string>& collector_list);
     static void Uninit();
+    static void SetDscpValue(uint8_t value);
 
     // Disable flow collection
     static void DisableFlowCollection(bool disable);
     static bool IsFlowCollectionDisabled() { return disable_flow_collection_; }
+
+    // Flags to control sending of sandesh from generators
+    static void DisableSendingAllMessages(bool disable);
+    static bool IsSendingAllMessagesDisabled();
+    static void DisableSendingObjectLogs(bool disable);
+    static bool IsSendingObjectLogsDisabled();
+    static bool IsSendingSystemLogsDisabled();
+    static void DisableSendingFlows(bool disable);
+    static bool IsSendingFlowsDisabled();
+    static void set_send_rate_limit(int rate_limit);
+    static uint32_t get_send_rate_limit();
 
     // Logging and category APIs
     static void SetLoggingParams(bool enable_local_log, std::string category,
@@ -211,7 +228,6 @@ public:
     static void SetTracePrint(bool enable);
     static void SetLoggingCategory(std::string category);
     static std::string LoggingCategory() { return logging_category_; }
-    static void SendLoggingResponse(std::string context);
 
     //GetSize method to report the size
     virtual size_t GetSize() const = 0;
@@ -224,10 +240,8 @@ public:
     static inline bool IsConnectToCollectorEnabled() {
         return connect_to_collector_;
     }
-    static void SendQueueResponse(std::string context);
     static void SetSendingLevel(size_t count, SandeshLevel::type level);
     static SandeshLevel::type SendingLevel() { return sending_level_; }
-    static void SendingParamsResponse(std::string context);
 
     static int32_t ReceiveBinaryMsgOne(u_int8_t *buf, u_int32_t buf_len,
             int *error, SandeshContext *client_context);
@@ -263,6 +277,8 @@ public:
     bool Enqueue(SandeshQueue* queue);
     virtual int32_t WriteBinary(u_int8_t *buf, u_int32_t buf_len, int *error);
     virtual int32_t ReadBinary(u_int8_t *buf, u_int32_t buf_len, int *error);
+    virtual int32_t WriteBinaryToFile(const std::string& path, int *error);
+    virtual int32_t ReadBinaryFromFile(const std::string& path, int *error);
 
     bool IsLoggingAllowed() const;
     static bool IsLoggingDroppedAllowed(SandeshType::type);
@@ -287,6 +303,7 @@ public:
     static void set_response_callback(SandeshCallback response_cb) { response_callback_ = response_cb; }
     static SandeshCallback response_callback() { return response_callback_; }
     static SandeshClient* client() { return client_; }
+    static SandeshConfig& config() { return config_; }
 
     time_t timestamp() const { return timestamp_; }
     void set_context(std::string context) { context_ = context; }
@@ -303,14 +320,6 @@ public:
     static const char* LevelToString(SandeshLevel::type level);
     static SandeshLevel::type StringToLevel(std::string level);
     static log4cplus::Logger& logger() { return logger_; }
-    static void set_send_rate_limit(int rate_limit) {
-        // if negative assign previous default value
-        if (rate_limit > 0) {
-            sandesh_send_ratelimit_ = rate_limit;
-        }
-    }
-    static uint32_t get_send_rate_limit() { return sandesh_send_ratelimit_; }
-
 
 protected:
     void set_timestamp(time_t timestamp) { timestamp_ = timestamp; }
@@ -352,7 +361,8 @@ protected:
     static SandeshCallback response_callback_;
     static SandeshClient *client_;
     static bool IsLevelUT(SandeshLevel::type level);
-    static bool IsLevelCategoryLoggingAllowed(SandeshLevel::type level,
+    static bool IsLevelCategoryLoggingAllowed(SandeshType::type type,
+                                              SandeshLevel::type level,
                                               const std::string& category);
 
 private:
@@ -361,10 +371,11 @@ private:
     typedef std::map<std::string, SandeshContext *> ModuleContextMap;
 
     static void InitReceive(int recv_task_inst = -1);
-    static void InitClient(EventManager *evm, Endpoint server, bool periodicuve);
+    static void InitClient(EventManager *evm, Endpoint server,
+                           const SandeshConfig &config, bool periodicuve);
     static bool InitClient(EventManager *evm,
                            const std::vector<std::string> &collectors,
-                           CollectorSubFn csf);
+                           const SandeshConfig &config);
     static bool ProcessRecv(SandeshRequest *);
     static bool Initialize(SandeshRole::type role, const std::string &module,
             const std::string &source, 
@@ -372,7 +383,8 @@ private:
             const std::string &instance_id,
             EventManager *evm,
             unsigned short http_port,
-            SandeshContext *client_context = NULL);
+            SandeshContext *client_context = NULL,
+            const SandeshConfig &config = SandeshConfig());
 
     static SandeshRole::type role_;
     static std::string module_;
@@ -398,6 +410,10 @@ private:
     static tbb::mutex stats_mutex_;
     static log4cplus::Logger logger_;
     static bool disable_flow_collection_; // disable flow collection
+    static SandeshConfig config_;
+    static bool disable_sending_all_;
+    static bool disable_sending_object_logs_;
+    static bool disable_sending_flows_;
 
     const uint32_t seqnum_;
     std::string context_;
@@ -633,5 +649,9 @@ log4cplus::LogLevel SandeshLevelTolog4Level(
 template <typename T>
 struct SandeshStructDeleteTrait {
     static bool get(const T& s) { return false; } 
+};
+template <typename T>
+struct SandeshStructProxyTrait {
+    static std::string get(const T& s) { return std::string(""); } 
 };
 #endif // __SANDESH_H__

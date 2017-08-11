@@ -14,7 +14,7 @@
 
 #include <boost/filesystem.hpp>
 #include <boost/bind.hpp>
-#include <boost/tokenizer.hpp>
+#include <boost/foreach.hpp>
 #include <base/logging.h>
 #include <base/parse_object.h>
 #include <base/queue_task.h>
@@ -22,6 +22,7 @@
 #include <io/tcp_session.h>
 
 #include <sandesh/transport/TBufferTransports.h>
+#include <sandesh/transport/TSimpleFileTransport.h>
 #include <sandesh/protocol/TBinaryProtocol.h>
 #include <sandesh/protocol/TProtocol.h>
 
@@ -52,8 +53,12 @@ bool Sandesh::enable_trace_print_ = false;
 bool Sandesh::send_queue_enabled_ = true;
 bool Sandesh::connect_to_collector_ = false;
 bool Sandesh::disable_flow_collection_ = false;
+bool Sandesh::disable_sending_all_ = false;
+bool Sandesh::disable_sending_object_logs_ = false;
+bool Sandesh::disable_sending_flows_ = false;
 SandeshLevel::type Sandesh::sending_level_ = SandeshLevel::INVALID;
 SandeshClient *Sandesh::client_ = NULL;
+SandeshConfig Sandesh::config_;
 std::auto_ptr<Sandesh::SandeshRxQueue> Sandesh::recv_queue_;
 std::string Sandesh::module_;
 std::string Sandesh::source_;
@@ -97,13 +102,16 @@ void Sandesh::InitReceive(int recv_task_inst) {
             &Sandesh::ProcessRecv));
 }
 
-void Sandesh::InitClient(EventManager *evm, Endpoint server, bool periodicuve) {
+void Sandesh::InitClient(EventManager *evm, Endpoint server,
+                         const SandeshConfig &config, bool periodicuve) {
     connect_to_collector_ = true;
     SANDESH_LOG(INFO, "SANDESH: CONNECT TO COLLECTOR: " <<
         connect_to_collector_);
     // Create and initialize the client
     assert(client_ == NULL);
-    client_ = new SandeshClient(evm, server, Endpoint(), 0, periodicuve);
+    std::vector<Endpoint> collector_endpoints = boost::assign::list_of(server);
+    client_ = new SandeshClient(evm, collector_endpoints, config,
+                                periodicuve);
     client_->Initiate();
 }
 
@@ -122,7 +130,8 @@ bool Sandesh::Initialize(SandeshRole::type role,
                          const std::string &instance_id,
                          EventManager *evm,
                          unsigned short http_port,
-                         SandeshContext *client_context) {
+                         SandeshContext *client_context,
+                         const SandeshConfig &config) {
     PullSandeshGenStatsReq = 1;
     PullSandeshUVE = 1;
     PullSandeshTraceReq = 1;
@@ -144,16 +153,14 @@ bool Sandesh::Initialize(SandeshRole::type role,
     node_type_      = node_type;
     instance_id_    = instance_id;
     client_context_ = client_context;
+    config_         = config;
     event_manager_  = evm;
-    //If Sandesh::sandesh_send_ratelimit_ is not defined by client,
-    // assign a default value to it
-    if (get_send_rate_limit() == 0) {
-        set_send_rate_limit(g_sandesh_constants.DEFAULT_SANDESH_SEND_RATELIMIT);
-    }
 
+    set_send_rate_limit(config.system_logs_rate_limit);
+    DisableSendingObjectLogs(config.disable_object_logs);
     InitReceive(Task::kTaskInstanceAny);
     bool success(SandeshHttp::Init(evm, module, http_port,
-        &SandeshHttpCallback, &http_port_));
+        &SandeshHttpCallback, &http_port_, config_));
     if (!success) {
         SANDESH_LOG(ERROR, "SANDESH: HTTP INIT FAILED (PORT " <<
             http_port << ")");
@@ -194,60 +201,33 @@ bool Sandesh::ConnectToCollector(const std::string &collector_ip,
     SANDESH_LOG(INFO, "SANDESH: COLLECTOR PORT : " << collector_port);
 
     tcp::endpoint collector(collector_addr, collector_port);
-    InitClient(event_manager_, collector, periodicuve);
+    InitClient(event_manager_, collector, Sandesh::config(), periodicuve);
     return true;
 }
 
-static bool make_endpoint(TcpServer::Endpoint& ep,const std::string& epstr) {
-
-    typedef boost::tokenizer<boost::char_separator<char> > tokenizer;
-    boost::char_separator<char> sep(":");
-
-    tokenizer tokens(epstr, sep);
-    tokenizer::iterator it = tokens.begin();
-    std::string sip(*it);
-    ++it;
-    std::string sport(*it);
-    int port;
-    stringToInteger(sport, port);
-    boost::system::error_code ec;
-    address addr = address::from_string(sip, ec);
-    if (ec) {
-        SANDESH_LOG(ERROR, __func__ << ": Invalid collector address: " <<
-                sip << " Error: " << ec);
-        return false;
+void Sandesh::ReConfigCollectors(const std::vector<std::string>& collector_list) {
+    if (client_) {
+        client_->ReConfigCollectors(collector_list);
     }
-    ep = TcpServer::Endpoint(addr, port);
-    return true;
 }
 
 bool Sandesh::InitClient(EventManager *evm, 
                          const std::vector<std::string> &collectors,
-                         CollectorSubFn csf) {
+                         const SandeshConfig &config) {
     connect_to_collector_ = true;
     SANDESH_LOG(INFO, "SANDESH: CONNECT TO COLLECTOR: " <<
         connect_to_collector_);
-
-    Endpoint primary = Endpoint();
-    Endpoint secondary = Endpoint();
-
-    if (collectors.size()!=0) {
-        if (!make_endpoint(primary, collectors[0])) {
+    std::vector<Endpoint> collector_endpoints;
+    BOOST_FOREACH(const std::string &collector, collectors) {
+        Endpoint ep;
+        if (!MakeEndpoint(&ep, collector)) {
+            SANDESH_LOG(ERROR, __func__ << ": Invalid collector address: " <<
+                        collector);
             return false;
         }
-        if (collectors.size()>1) {
-            if (!make_endpoint(secondary, collectors[1])) {
-                return false;
-            } 
-        }
+        collector_endpoints.push_back(ep);
     }
-    if (collectors.size()>2) {
-        SANDESH_LOG(ERROR, __func__ << " Too many collectors");
-        return false;
-    }
-
-    client_ = new SandeshClient(evm,
-            primary, secondary, csf, true);
+    client_ = new SandeshClient(evm, collector_endpoints, config, true);
     client_->Initiate();
     return true;
 }
@@ -258,12 +238,12 @@ bool Sandesh::InitGenerator(const std::string &module,
                             const std::string &instance_id,
                             EventManager *evm,
                             unsigned short http_port,
-                            SandeshContext *client_context, 
-                            std::map<std::string,
-                                std::map<std::string,std::string> > ds) {
+                            SandeshContext *client_context,
+                            DerivedStats ds,
+                            const SandeshConfig &config) {
     assert(SandeshUVETypeMaps::InitDerivedStats(ds));
     return Initialize(SandeshRole::Generator, module, source, node_type,
-                      instance_id, evm, http_port, client_context);
+                      instance_id, evm, http_port, client_context, config);
 }
 
 bool Sandesh::InitGenerator(const std::string &module,
@@ -272,18 +252,18 @@ bool Sandesh::InitGenerator(const std::string &module,
                             const std::string &instance_id,
                             EventManager *evm, 
                             unsigned short http_port,
-                            CollectorSubFn csf,
                             const std::vector<std::string> &collectors,
                             SandeshContext *client_context,
-                            std::map<std::string,
-                                std::map<std::string,std::string> > ds) {
+                            DerivedStats ds,
+                            const SandeshConfig &config) {
     assert(SandeshUVETypeMaps::InitDerivedStats(ds));
     bool success(Initialize(SandeshRole::Generator, module, source, node_type,
-                            instance_id, evm, http_port, client_context));
+                            instance_id, evm, http_port, client_context,
+                            config));
     if (!success) {
         return false;
     }
-    return InitClient(evm, collectors, csf);
+    return InitClient(evm, collectors, config);
 }
 
 // Collector
@@ -294,9 +274,11 @@ bool Sandesh::InitCollector(const std::string &module,
                             EventManager *evm, 
                             const std::string &collector_ip, int collector_port,
                             unsigned short http_port,
-                            SandeshContext *client_context) {
+                            SandeshContext *client_context,
+                            const SandeshConfig &config) {
     bool success(Initialize(SandeshRole::Collector, module, source, node_type,
-                            instance_id, evm, http_port, client_context));
+                            instance_id, evm, http_port, client_context,
+                            config));
     if (!success) {
         return false;
     }
@@ -309,9 +291,10 @@ bool Sandesh::InitGeneratorTest(const std::string &module,
                                 const std::string &instance_id,
                                 EventManager *evm,
                                 unsigned short http_port, 
-                                SandeshContext *client_context) {
+                                SandeshContext *client_context,
+                                const SandeshConfig &config) {
     return Initialize(SandeshRole::Test, module, source, node_type,
-                      instance_id, evm, http_port, client_context);
+                      instance_id, evm, http_port, client_context, config);
 }
 
 static void WaitForIdle() {
@@ -324,6 +307,13 @@ static void WaitForIdle() {
         }
         usleep(1000);
     }    
+}
+
+void Sandesh::SetDscpValue(uint8_t value) {
+    SandeshClient *client = Sandesh::client();
+    if (client) {
+        client->SetDscpValue(value);
+    }
 }
 
 void Sandesh::Uninit() {
@@ -474,6 +464,58 @@ void Sandesh::DisableFlowCollection(bool disable) {
     }
 }
 
+void Sandesh::DisableSendingAllMessages(bool disable) {
+    if (disable_sending_all_ != disable) {
+        SANDESH_LOG(INFO, "SANDESH: Disable Sending ALL Messages: " <<
+            disable_sending_all_ << " -> " << disable);
+        disable_sending_all_ = disable;
+    }
+}
+
+bool Sandesh::IsSendingAllMessagesDisabled() {
+    return disable_sending_all_;
+}
+
+void Sandesh::DisableSendingObjectLogs(bool disable) {
+    if (disable_sending_object_logs_ != disable) {
+        SANDESH_LOG(INFO, "SANDESH: Disable Sending Object Logs: " <<
+            disable_sending_object_logs_ << " -> " << disable);
+        disable_sending_object_logs_ = disable;
+    }
+}
+
+bool Sandesh::IsSendingObjectLogsDisabled() {
+    return disable_sending_object_logs_;
+}
+
+void Sandesh::DisableSendingFlows(bool disable) {
+    if (disable_sending_flows_ != disable) {
+        SANDESH_LOG(INFO, "SANDESH: Disable Sending Flows: " <<
+            disable_sending_flows_ << " -> " << disable);
+        disable_sending_flows_ = disable;
+    }
+}
+
+bool Sandesh::IsSendingFlowsDisabled() {
+    return disable_sending_flows_;
+}
+
+bool Sandesh::IsSendingSystemLogsDisabled() {
+    return sandesh_send_ratelimit_ == 0;
+}
+
+void Sandesh::set_send_rate_limit(int rate_limit) {
+    if (rate_limit >= 0) {
+        SANDESH_LOG(INFO, "SANDESH: System Log Send Rate Limit: " <<
+            sandesh_send_ratelimit_ << " -> " << rate_limit);
+        sandesh_send_ratelimit_ = rate_limit;
+    }
+}
+
+uint32_t Sandesh::get_send_rate_limit() {
+    return sandesh_send_ratelimit_;
+}
+
 bool Sandesh::Enqueue(SandeshQueue *queue) {
     if (!queue) {
         if (IsLoggingDroppedAllowed(type())) {
@@ -532,6 +574,40 @@ int32_t Sandesh::ReadBinary(u_int8_t *buf, u_int32_t buf_len,
     if (xfer < 0) {
         SANDESH_LOG(DEBUG, __func__ << "Read sandesh from " << buf_len <<
                 " bytes FAILED" << std::endl);
+        *error = EINVAL;
+        return xfer;
+    }
+    return xfer;
+}
+
+int32_t Sandesh::WriteBinaryToFile(const std::string& path, int *error) {
+    int32_t xfer;
+    boost::shared_ptr<TSimpleFileTransport> btrans =
+            boost::shared_ptr<TSimpleFileTransport>(
+                    new TSimpleFileTransport(path, false, true));
+    boost::shared_ptr<TBinaryProtocol> prot =
+            boost::shared_ptr<TBinaryProtocol>(new TBinaryProtocol(btrans));
+    xfer = Write(prot);
+    if (xfer < 0) {
+        SANDESH_LOG(DEBUG, __func__ << "Write sandesh to file FAILED"
+                << std::endl);
+        *error = EINVAL;
+        return xfer;
+    }
+    return xfer;
+}
+
+int32_t Sandesh::ReadBinaryFromFile(const std::string& path, int *error) {
+    int32_t xfer;
+    boost::shared_ptr<TSimpleFileTransport> btrans =
+            boost::shared_ptr<TSimpleFileTransport>(
+                    new TSimpleFileTransport(path));
+    boost::shared_ptr<TBinaryProtocol> prot =
+            boost::shared_ptr<TBinaryProtocol>(new TBinaryProtocol(btrans));
+    xfer = Read(prot);
+    if (xfer < 0) {
+        SANDESH_LOG(DEBUG, __func__ << "Read sandesh from file FAILED"
+                << std::endl);
         *error = EINVAL;
         return xfer;
     }
@@ -634,7 +710,8 @@ bool Sandesh::Dispatch(SandeshConnection * sconn) {
 
 bool SandeshResponse::Dispatch(SandeshConnection * sconn) {
     assert(sconn == NULL);
-    if (context().find("http%") == 0) {
+    if ((context().find("http%") == 0) ||
+        (context().find("https%") == 0)) {
         SandeshHttp::Response(this, context());
         return true;
     }
@@ -646,7 +723,8 @@ bool SandeshResponse::Dispatch(SandeshConnection * sconn) {
 
 bool SandeshTrace::Dispatch(SandeshConnection * sconn) {
     assert(sconn == NULL);
-    if (0 == context().find("http%")) {
+    if ((0 == context().find("http%")) ||
+        (0 == context().find("https%"))) {
         SandeshHttp::Response(this, context());
         return true;
     }
@@ -655,11 +733,19 @@ bool SandeshTrace::Dispatch(SandeshConnection * sconn) {
 
 bool SandeshUVE::Dispatch(SandeshConnection * sconn) {
     assert(sconn == NULL);
-    if (0 == context().find("http%")) {
+    if ((0 == context().find("http%")) ||
+        (0 == context().find("https%"))) {
         SandeshHttp::Response(this, context());
         return true;
     }
     if (client_) {
+        if (IsSendingAllMessagesDisabled()) {
+            Log();
+            UpdateTxMsgFailStats(Name(), 0,
+                SandeshTxDropReason::SendingDisabled);
+            Release();
+            return false;
+        }
         if (!client_->SendSandeshUVE(this)) {
             SANDESH_LOG(ERROR, "SandeshUVE : Send FAILED: " << ToString());
             UpdateTxMsgFailStats(Name(), 0,
@@ -698,8 +784,14 @@ bool Sandesh::IsLevelUT(SandeshLevel::type level) {
             level <= SandeshLevel::UT_END;
 }
 
-bool Sandesh::IsLevelCategoryLoggingAllowed(SandeshLevel::type level,
-                                                   const std::string& category) {
+bool Sandesh::IsLevelCategoryLoggingAllowed(SandeshType::type type,
+                                            SandeshLevel::type level,
+                                            const std::string& category) {
+    // Do not log UVEs unless explicitly configured via setting log_level
+    // to INVALID. This is to avoid flooding the log files with UVEs
+    if (type == SandeshType::UVE) {
+        level = SandeshLevel::INVALID;
+    }
     bool level_allowed = logging_level_ >= level;
     bool category_allowed = !logging_category_.empty() ?
             logging_category_ == category : true;
@@ -711,7 +803,7 @@ bool Sandesh::IsLoggingAllowed() const {
         return enable_flow_log_;
     } else {
         return IsLocalLoggingEnabled() &&
-                IsLevelCategoryLoggingAllowed(level_, category_);
+                IsLevelCategoryLoggingAllowed(type_, level_, category_);
     }
 }
 
@@ -795,9 +887,11 @@ void Sandesh::SetSendQueue(bool enable) {
     }
 }
 
+// In sandesh state machine on collector, we can only drop systemlog,
+// objectlog, and flow. UVEs can only be dropped after being dequeued from
+// the state machine and published on redis/kafka
 bool DoDropSandeshMessage(const SandeshHeader &header,
     const SandeshLevel::type drop_level) {
-    // Only systemlog, objectlog, and flow have level
     SandeshType::type stype(header.get_Type());
     if (stype == SandeshType::SYSTEM ||
         stype == SandeshType::OBJECT ||

@@ -20,7 +20,7 @@ public:
         const SandeshMessage *msg)> ReceiveMsgCb;
 
     SandeshServerTest(EventManager *evm, ReceiveMsgCb cb) :
-        SandeshServer(evm),
+        SandeshServer(evm, SandeshConfig()),
         cb_(cb) {
     }
 
@@ -37,6 +37,7 @@ private:
 };
 
 void CreateFakeMessage(uint8_t *data, size_t length);
+void CreateFakeCtrlMessage(std::string& data);
 
 } // end namespace test
 } // end namespace sandesh

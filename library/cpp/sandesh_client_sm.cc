@@ -82,14 +82,14 @@ struct EvStop : sc::event<EvStop> {
     bool enq_;
 };
 
-struct EvDiscUpdate : sc::event<EvDiscUpdate> {
-    EvDiscUpdate(TcpServer::Endpoint active, TcpServer::Endpoint backup) :
-            active_(active), backup_(backup) {
+struct EvCollectorUpdate : sc::event<EvCollectorUpdate> {
+    EvCollectorUpdate(const std::vector<TcpServer::Endpoint> &collectors) :
+            collectors_(collectors) {
     }
     static const char * Name() {
-        return "EvDiscUpdate";
+        return "EvCollectorUpdate";
     }
-    TcpServer::Endpoint active_,backup_;
+    std::vector<TcpServer::Endpoint> collectors_;
 };
 
 struct EvIdleHoldTimerExpired : sc::event<EvIdleHoldTimerExpired> {
@@ -219,7 +219,7 @@ struct Idle : public sc::state<Idle, SandeshClientSMImpl> {
             sc::custom_reaction<EvStart>,
             sc::custom_reaction<EvStop>,
             sc::custom_reaction<EvIdleHoldTimerExpired>,
-            sc::custom_reaction<EvDiscUpdate>,
+            sc::custom_reaction<EvCollectorUpdate>,
             ReleaseSandesh<EvSandeshSend>::reaction,
             DeleteTcpSession<EvTcpDeleteSession>::reaction
         > reactions;
@@ -263,40 +263,26 @@ struct Idle : public sc::state<Idle, SandeshClientSMImpl> {
         return discard_event();
     }
 
-    sc::result react(const EvDiscUpdate &event) {
+    sc::result react(const EvCollectorUpdate &event) {
         SandeshClientSMImpl *state_machine = &context<SandeshClientSMImpl>();
-        state_machine->DiscUpdate(
-                SandeshClientSM::IDLE, true,
-                event.active_, event.backup_);
+        state_machine->CollectorUpdate(event.collectors_);
         return discard_event();
     }
     sc::result react(const EvIdleHoldTimerExpired &event) {
         SandeshClientSMImpl *state_machine = &context<SandeshClientSMImpl>();
-        if (state_machine->DiscUpdate(
-                SandeshClientSM::IDLE, false,
-                TcpServer::Endpoint(), TcpServer::Endpoint())) {
-            // Update connection info
-            ConnectionState::GetInstance()->Update(ConnectionType::COLLECTOR,
-                std::string(), ConnectionStatus::INIT,
-                state_machine->server(),
-                state_machine->StateName() + " : " + event.Name() + 
-                    " -> Connect");
-            return transit<Connect>();
-        } 
         // Update connection info
         ConnectionState::GetInstance()->Update(ConnectionType::COLLECTOR,
-            std::string(), ConnectionStatus::DOWN,
+            std::string(), ConnectionStatus::INIT,
             state_machine->server(),
-            state_machine->StateName() + " : " + event.Name() + 
-                " -> Disconnect");
-        return transit<Disconnect>();
+            state_machine->StateName() + " : " + event.Name() + " -> Connect");
+        return transit<Connect>();
     }
 };
 
 struct Disconnect : public sc::state<Disconnect, SandeshClientSMImpl> {
     typedef mpl::list<
             TransitToIdle<EvStop>::reaction,
-            sc::custom_reaction<EvDiscUpdate>,
+            sc::custom_reaction<EvCollectorUpdate>,
             ReleaseSandesh<EvSandeshSend>::reaction,
             DeleteTcpSession<EvTcpDeleteSession>::reaction
         > reactions;
@@ -308,20 +294,16 @@ struct Disconnect : public sc::state<Disconnect, SandeshClientSMImpl> {
         state_machine->SendUVE();
     }
 
-    sc::result react(const EvDiscUpdate &event) {
+    sc::result react(const EvCollectorUpdate &event) {
         SandeshClientSMImpl *state_machine = &context<SandeshClientSMImpl>();
-        if (state_machine->DiscUpdate(
-                SandeshClientSM::DISCONNECT, true,
-                event.active_, event.backup_)) {
-            // Update connection info
-            ConnectionState::GetInstance()->Update(ConnectionType::COLLECTOR,
-                std::string(), ConnectionStatus::INIT,
-                state_machine->server(),
-                state_machine->StateName() + " : " + event.Name() + 
-                    " -> Connect");
-            return transit<Connect>();
-        } 
-        return discard_event();
+        state_machine->CollectorUpdate(event.collectors_);
+        // Update connection info
+        ConnectionState::GetInstance()->Update(ConnectionType::COLLECTOR,
+            std::string(), ConnectionStatus::INIT,
+            state_machine->server(),
+            state_machine->StateName() + " : " + event.Name() +
+                " -> Connect");
+        return transit<Connect>();
     }
 };
 
@@ -332,7 +314,7 @@ struct Connect : public sc::state<Connect, SandeshClientSMImpl> {
             sc::custom_reaction<EvTcpConnected>,
             sc::custom_reaction<EvTcpConnectFail>,
             sc::custom_reaction<EvTcpClose>,
-            sc::custom_reaction<EvDiscUpdate>,
+            sc::custom_reaction<EvCollectorUpdate>,
             ReleaseSandesh<EvSandeshSend>::reaction,
             DeleteTcpSession<EvTcpDeleteSession>::reaction
         > reactions;
@@ -358,9 +340,7 @@ struct Connect : public sc::state<Connect, SandeshClientSMImpl> {
     sc::result react(const EvTcpConnectFail &event) {
         SandeshClientSMImpl *state_machine = &context<SandeshClientSMImpl>();
         SM_LOG(DEBUG, state_machine->StateName() << " : " << event.Name());
-        state_machine->DiscUpdate(
-                SandeshClientSM::CONNECT, false,
-                TcpServer::Endpoint(), TcpServer::Endpoint());
+        state_machine->CollectorChange();
         return ToIdle(state_machine, event.Name());
     }
 
@@ -368,10 +348,7 @@ struct Connect : public sc::state<Connect, SandeshClientSMImpl> {
     sc::result react(const EvConnectTimerExpired &event) {
         SandeshClientSMImpl *state_machine = &context<SandeshClientSMImpl>();
         SM_LOG(DEBUG, state_machine->StateName() << " : " << event.Name());
-        // Flip the active and backup collector
-        state_machine->DiscUpdate(
-                SandeshClientSM::CONNECT, false,
-                TcpServer::Endpoint(), TcpServer::Endpoint());
+        state_machine->CollectorChange();
         return ToIdle(state_machine, event.Name());
     }
 
@@ -393,14 +370,13 @@ struct Connect : public sc::state<Connect, SandeshClientSMImpl> {
     sc::result react(const EvTcpClose &event) {
         SandeshClientSMImpl *state_machine = &context<SandeshClientSMImpl>();
         SM_LOG(DEBUG, state_machine->StateName() << " : " << event.Name());
+        state_machine->CollectorChange();
         return ToIdle(state_machine, event.Name());
     }
 
-    sc::result react(const EvDiscUpdate &event) {
+    sc::result react(const EvCollectorUpdate &event) {
         SandeshClientSMImpl *state_machine = &context<SandeshClientSMImpl>();
-        if (state_machine->DiscUpdate(
-                SandeshClientSM::CONNECT, true,
-                event.active_, event.backup_)) {
+        if (state_machine->CollectorUpdate(event.collectors_)) {
             return ToIdle(state_machine, event.Name());
         }  
         return discard_event();
@@ -439,7 +415,7 @@ struct ClientInit : public sc::state<ClientInit, SandeshClientSMImpl> {
         sc::custom_reaction<EvTcpClose>,
         sc::custom_reaction<EvSandeshMessageRecv>,
         sc::custom_reaction<EvSandeshSend>,
-        sc::custom_reaction<EvDiscUpdate>,
+        sc::custom_reaction<EvCollectorUpdate>,
         DeleteTcpSession<EvTcpDeleteSession>::reaction
     > reactions;
 
@@ -461,15 +437,14 @@ struct ClientInit : public sc::state<ClientInit, SandeshClientSMImpl> {
     sc::result react(const EvTcpClose &event) {
         SandeshClientSMImpl *state_machine = &context<SandeshClientSMImpl>();
         SM_LOG(DEBUG, state_machine->StateName() << " : " << event.Name());
-        state_machine->DiscUpdate(
-                SandeshClientSM::CLIENT_INIT, false,
-                TcpServer::Endpoint(), TcpServer::Endpoint());
+        state_machine->CollectorChange();
         return ToIdle(state_machine, event.Name());
     }
 
     sc::result react(const EvConnectTimerExpired &event) {
         SandeshClientSMImpl *state_machine = &context<SandeshClientSMImpl>();
         SM_LOG(DEBUG, state_machine->StateName() << " : " << event.Name());
+        state_machine->CollectorChange();
         return ToIdle(state_machine, event.Name());
     }
 
@@ -517,11 +492,9 @@ struct ClientInit : public sc::state<ClientInit, SandeshClientSMImpl> {
         return discard_event();
     }
 
-    sc::result react(const EvDiscUpdate &event) {
+    sc::result react(const EvCollectorUpdate &event) {
         SandeshClientSMImpl *state_machine = &context<SandeshClientSMImpl>();
-        if (state_machine->DiscUpdate(
-                SandeshClientSM::CLIENT_INIT, true,
-                event.active_, event.backup_)) {
+        if (state_machine->CollectorUpdate(event.collectors_)) {
             return ToIdle(state_machine, event.Name());
         }  
         return discard_event();
@@ -547,7 +520,7 @@ struct Established : public sc::state<Established, SandeshClientSMImpl> {
         sc::custom_reaction<EvTcpClose>,
         sc::custom_reaction<EvSandeshMessageRecv>,
         sc::custom_reaction<EvSandeshSend>,
-        sc::custom_reaction<EvDiscUpdate>,
+        sc::custom_reaction<EvCollectorUpdate>,
         DeleteTcpSession<EvTcpDeleteSession>::reaction
     > reactions;
 
@@ -570,13 +543,9 @@ struct Established : public sc::state<Established, SandeshClientSMImpl> {
     }
 
     sc::result react(const EvTcpClose &event) {
-
         SandeshClientSMImpl *state_machine = &context<SandeshClientSMImpl>();
         SM_LOG(DEBUG, state_machine->StateName() << " : " << event.Name());
-
-        if (state_machine->DiscUpdate(
-                SandeshClientSM::ESTABLISHED, false,
-                TcpServer::Endpoint(), TcpServer::Endpoint())) {
+        if (state_machine->CollectorChange()) {
             // Update connection info
             ConnectionState::GetInstance()->Update(ConnectionType::COLLECTOR,
                 std::string(), ConnectionStatus::INIT,
@@ -611,12 +580,9 @@ struct Established : public sc::state<Established, SandeshClientSMImpl> {
         return discard_event();
     }
 
-    sc::result react(const EvDiscUpdate &event) {
+    sc::result react(const EvCollectorUpdate &event) {
         SandeshClientSMImpl *state_machine = &context<SandeshClientSMImpl>();
-
-        if (state_machine->DiscUpdate(
-                SandeshClientSM::ESTABLISHED, true,
-                event.active_, event.backup_)) {
+        if (state_machine->CollectorUpdate(event.collectors_)) {
             // Update connection info
             ConnectionState::GetInstance()->Update(ConnectionType::COLLECTOR,
                 std::string(), ConnectionStatus::INIT,
@@ -935,8 +901,6 @@ void SandeshClientSMImpl::Enqueue(const Ev &event) {
 SandeshClientSMImpl::SandeshClientSMImpl(EventManager *evm, Mgr *mgr,
         int sm_task_instance, int sm_task_id, bool periodicuve)
     :   SandeshClientSM(mgr),
-        active_(TcpServer::Endpoint()),
-        backup_(TcpServer::Endpoint()),
         work_queue_(sm_task_id, sm_task_instance,
                 boost::bind(&SandeshClientSMImpl::DequeueEvent, this, _1)),
         connect_timer_(TimerManager::CreateTimer(*evm->io_service(), "Client Connect timer", sm_task_id, sm_task_instance)),
@@ -1044,49 +1008,54 @@ bool SandeshClientSMImpl::StatisticsTimerExpired() {
     return true;
 }
 
-void SandeshClientSMImpl::GetCandidates(TcpServer::Endpoint& active,
-        TcpServer::Endpoint &backup) const {
-    active = active_;
-    backup = backup_;   
+void SandeshClientSMImpl::SetCollectors(
+        const std::vector<TcpServer::Endpoint>& collectors) {
+   Enqueue(scm::EvCollectorUpdate(collectors));
 }
 
-void SandeshClientSMImpl::SetCandidates(
-        TcpServer::Endpoint active, TcpServer::Endpoint backup) {
-   Enqueue(scm::EvDiscUpdate(active,backup)); 
+void SandeshClientSMImpl::GetCollectors(
+        std::vector<TcpServer::Endpoint>& collectors) {
+    collectors = collectors_;
 }
 
-bool SandeshClientSMImpl::DiscUpdate(State from_state, bool update,
-        TcpServer::Endpoint active, TcpServer::Endpoint backup) {
+TcpServer::Endpoint SandeshClientSMImpl::GetCollector() const {
+    if (collectors_.size()) {
+        return collectors_[collector_index_];
+    }
+    return TcpServer::Endpoint();
+}
 
-    if (update) {
-        active_ = active;
-        backup_ = backup;        
-    }
-    if ((from_state == DISCONNECT) ||
-        ((from_state == IDLE) && (!update))) {
-            set_server(active_);
-            SendUVE();
-            return true;
-    }
-    if ((from_state == ESTABLISHED)||(from_state == CONNECT)||(from_state == CLIENT_INIT)) {
-        if (!update) {
-            if (backup_!=TcpServer::Endpoint()) {
-                TcpServer::Endpoint temp = backup_;
-                backup_ = active_;
-                active_ = temp; 
-                set_server(active_);
-                SendUVE();
-                return true;
-            }
-        } else {
-            if (server()!=active_) {
-                set_server(active_);
-                SendUVE();
-                return true;                
-            }
+TcpServer::Endpoint SandeshClientSMImpl::GetNextCollector() {
+    if (collectors_.size()) {
+        if (++collector_index_ == collectors_.size()) {
+            collector_index_ = 0;
         }
+        return collectors_[collector_index_];
+    }
+    return TcpServer::Endpoint();
+}
+
+bool SandeshClientSMImpl::CollectorUpdate(
+        const std::vector<TcpServer::Endpoint>& collectors) {
+    collectors_ = collectors;
+    collector_index_ = 0;
+    TcpServer::Endpoint collector(GetCollector());
+    if (server() != collector) {
+        set_server(collector);
+        SendUVE();
+        return true;
     }
     SendUVE();
+    return false;
+}
+
+bool SandeshClientSMImpl::CollectorChange() {
+    TcpServer::Endpoint collector(GetNextCollector());
+    if (server() != collector) {
+        set_server(collector);
+        SendUVE();
+        return true;
+    }
     return false;
 }
 

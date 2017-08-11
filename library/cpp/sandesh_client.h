@@ -22,7 +22,8 @@
 #include <tbb/atomic.h>
 
 #include <io/tcp_server.h>
-#include <io/tcp_session.h>
+#include <io/ssl_server.h>
+#include <io/ssl_session.h>
 #include <base/queue_task.h>
 #include <base/timer.h>
 #include <sandesh/sandesh_session.h>
@@ -35,12 +36,11 @@ class SandeshUVE;
 class SandeshHeader;
 
 
-class SandeshClient : public TcpServer, public SandeshClientSM::Mgr {
+class SandeshClient : public SslServer, public SandeshClientSM::Mgr {
 public:
     
-    SandeshClient(EventManager *evm, Endpoint primary,
-             Endpoint secondary = Endpoint(),
-             Sandesh::CollectorSubFn csf = 0,
+    SandeshClient(EventManager *evm, const std::vector<Endpoint> &collectors,
+             const SandeshConfig &config,
              bool periodicuve = false);
 
     virtual ~SandeshClient();
@@ -49,7 +49,7 @@ public:
     void Shutdown();
 
     virtual SandeshSession *CreateSMSession(
-            TcpSession::EventObserver eocb,
+            SslSession::EventObserver eocb,
             SandeshReceiveMsgCb rmcb,
             TcpServer::Endpoint ep);
 
@@ -62,7 +62,7 @@ public:
         const uint32_t header_offset);
     void SendUVE(int count,
         const std::string & stateName, const std::string & server,
-        Endpoint primary, Endpoint secondary);
+        const Endpoint & server_ip, const std::vector<Endpoint> & collector_eps);
 
     bool SendSandesh(Sandesh *snh);
 
@@ -87,14 +87,17 @@ public:
         return sm_.get();
     }
 
+    void SetDscpValue(uint8_t value);
+
     void SetSessionWaterMarkInfo(Sandesh::QueueWaterMarkInfo &scwm);
     void ResetSessionWaterMarkInfo();
     void GetSessionWaterMarkInfo(
         std::vector<Sandesh::QueueWaterMarkInfo> &scwm_info) const;
+    void ReConfigCollectors(const std::vector<std::string>&);
 
     friend class CollectorInfoRequest;
 protected:
-    virtual TcpSession *AllocSession(Socket *socket);
+    virtual SslSession *AllocSession(SslSocket *socket);
 
 private:
     static const int kSMTaskInstance = 0;
@@ -109,13 +112,12 @@ private:
     int session_task_instance_;
     int session_writer_task_id_;
     int session_reader_task_id_;
-    Endpoint primary_, secondary_;
-    Sandesh::CollectorSubFn csf_;
+    uint8_t dscp_value_;
+    std::vector<Endpoint> collectors_;
     boost::scoped_ptr<SandeshClientSM> sm_;
     std::vector<Sandesh::QueueWaterMarkInfo> session_wm_info_;
     static bool task_policy_set_;
 
-    void CollectorHandler(std::vector<DSResponse> resp);
     bool ReceiveCtrlMsg(const std::string &msg,
         const SandeshHeader &header, const std::string &sandesh_name,
         const uint32_t header_offset);

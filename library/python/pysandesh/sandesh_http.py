@@ -26,7 +26,15 @@ from transport import TTransport
 from protocol import TXMLProtocol
 import os
 import socket
+from gevent import ssl
 
+class SandeshStdLog(object):
+    def __init__(self, server_name, http_port):
+        self._server_name = server_name
+        self._port = http_port
+
+    def write(self, text):
+        sys.stderr.write('[' + self._server_name + ':' + str(self._port) + ']' + text)
 
 class SandeshHttp(object):
 
@@ -51,7 +59,7 @@ class SandeshHttp(object):
     '/js/util.js',
     '/universal_parse.xsl']
 
-    def __init__(self, sandesh, module, port, pkg_list):
+    def __init__(self, sandesh, module, port, pkg_list, sandesh_config=None):
         self._sandesh = sandesh
         self._logger = sandesh.logger()
         self._module = module
@@ -70,6 +78,9 @@ class SandeshHttp(object):
         self._jquery_collapse_js_path = None
         self._jquery_1_8_1_js_path = None
         self._http_server = None
+        self._sandesh_config = sandesh_config
+        self._std_log = SandeshStdLog("Introspect", self._http_port)
+
         try:
             imp_pysandesh = __import__('pysandesh')
         except ImportError:
@@ -107,7 +118,17 @@ class SandeshHttp(object):
             self._sandesh.record_port("http", self._http_port)
             self._logger.error('Starting Introspect on HTTP Port %d' %
                 self._http_port)
-            self._http_server = WSGIServer(sock, self._http_app)
+            if self._sandesh_config and \
+                    self._sandesh_config.introspect_ssl_enable:
+                ca_certs=self._sandesh_config.ca_cert
+                keyfile=self._sandesh_config.keyfile
+                certfile=self._sandesh_config.certfile
+                self._http_server = WSGIServer(sock, self._http_app,
+                    ca_certs=ca_certs, keyfile=keyfile,
+                    certfile=certfile, ssl_version=ssl.PROTOCOL_TLSv1,
+                    cert_reqs=ssl.CERT_REQUIRED, log=self._std_log)
+            else:
+                self._http_server = WSGIServer(sock, self._http_app, log=self._std_log)
             self._http_server.serve_forever()
     # end start_http_server
 

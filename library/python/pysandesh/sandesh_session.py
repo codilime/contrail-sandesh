@@ -12,7 +12,7 @@ from functools import partial
 from transport import TTransport
 from protocol import TXMLProtocol
 from work_queue import WorkQueue, WaterMark
-from tcp_session import TcpSession
+from ssl_session import SslSession
 from sandesh_logger import SandeshLogger
 from gen_py.sandesh.ttypes import SandeshLevel, SandeshTxDropReason
 
@@ -262,7 +262,7 @@ class SandeshSendQueue(WorkQueue):
 # end class SandeshSendQueue
 
 
-class SandeshSession(TcpSession):
+class SandeshSession(SslSession):
     _KEEPALIVE_IDLE_TIME = 15  # in secs
     _KEEPALIVE_INTERVAL = 3  # in secs
     _KEEPALIVE_PROBES = 5
@@ -271,7 +271,11 @@ class SandeshSession(TcpSession):
 
     def __init__(self, sandesh_instance, server, event_handler,
                  sandesh_msg_handler):
-        TcpSession.__init__(self, server)
+        sandesh_config = sandesh_instance.config()
+        super(SandeshSession, self).__init__(server,
+            sandesh_config.sandesh_ssl_enable, sandesh_config.keyfile,
+            sandesh_config.certfile, sandesh_config.ca_cert)
+        self._dscp_value = sandesh_config.dscp_value
         self._sandesh_instance = sandesh_instance
         self._logger = sandesh_instance._logger
         self._event_handler = event_handler
@@ -321,10 +325,19 @@ class SandeshSession(TcpSession):
         return self._send_queue
     # end send_queue
 
-    # Overloaded functions from TcpSession
+    def dscp_value(self):
+        dscp = 0
+        try:
+            dscp = self._socket.getsockopt(socket.IPPROTO_IP, socket.IP_TOS)
+        except :
+            self._logger.error('Error fetching DSCP value from Sandesh session')
+        return dscp
+    # end dscp_value
+
+    # Overloaded functions from SslSession
 
     def connect(self):
-        TcpSession.connect(self, timeout=5)
+        super(SandeshSession, self).connect(timeout=5)
     # end connect
 
     def _on_read(self, buf):
@@ -351,6 +364,13 @@ class SandeshSession(TcpSession):
             self._socket.setsockopt(
                 socket.IPPROTO_TCP, socket.TCP_KEEPINTVL,
                 self._KEEPALIVE_INTERVAL)
+        if hasattr(socket, 'IP_TOS') and (self._dscp_value != 0):
+            #The 'value' argument is expected to have DSCP value between 0 and
+            #63 ie., in the lower order 6 bits of a byte. However, setsockopt
+            #expects DSCP value in upper 6 bits of a byte. Hence left shift the
+            #value by 2 digits before passing it to setsockopt
+            value = self._dscp_value << 2
+            self._socket.setsockopt(socket.IPPROTO_IP, socket.IP_TOS, value)
         if hasattr(socket, 'TCP_KEEPCNT'):
             self._socket.setsockopt(
                 socket.IPPROTO_TCP, socket.TCP_KEEPCNT, self._KEEPALIVE_PROBES)
