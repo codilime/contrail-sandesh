@@ -8,10 +8,6 @@
 // Sandesh Implementation
 //
 
-#ifdef _WIN32
-#define WIN32_LEAN_AND_MEAN
-#endif
-
 #include <boost/filesystem.hpp>
 #include <boost/bind.hpp>
 #include <boost/foreach.hpp>
