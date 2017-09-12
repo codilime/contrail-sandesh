@@ -25,7 +25,6 @@
 #endif
 #include <stdio.h>
 #include <assert.h>
-#include <ctime>
 
 #include <sys/types.h>
 #ifdef HAVE_NETINET_IN_H
@@ -38,12 +37,8 @@
 /**
  * CONTRAIL-CUSTOM
  */
-#ifndef _WIN32
 #include <netinet/in.h>
 #include <sys/socket.h>
-#else
-#include <winutils.h>
-#endif
 
 #include <string>
 #include <map>
@@ -55,6 +50,10 @@
 
 #include <boost/utility/enable_if.hpp>
 #include <boost/type_traits/is_convertible.hpp>
+
+#ifdef _WIN32
+#include <posix_time.h>
+#endif
 
 /**
  * Helper macros to allow function overloading even when using

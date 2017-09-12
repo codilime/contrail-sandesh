@@ -28,7 +28,7 @@
 
 #ifdef _WIN32
 #include <io.h>
-#include <winutils.h>
+typedef ptrdiff_t ssize_t;
 #endif
 
 #include <base/logging.h>

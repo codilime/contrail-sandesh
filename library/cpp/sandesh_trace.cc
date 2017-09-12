@@ -8,10 +8,6 @@
 // Sandesh Trace Request Implementation
 //
 
-#ifdef _WIN32
-#define WIN32_LEAN_AND_MEAN
-#endif
-
 #include <boost/bind.hpp>
 #include <ctime>
 #include <base/trace.h>
