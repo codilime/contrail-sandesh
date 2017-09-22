@@ -16,6 +16,7 @@
 #include <base/queue_task.h>
 #include <http/http_session.h>
 #include <io/tcp_session.h>
+#include <fstream>
 
 #include <sandesh/transport/TBufferTransports.h>
 #include <sandesh/protocol/TBinaryProtocol.h>
@@ -70,6 +71,7 @@ log4cplus::Logger Sandesh::logger_ =
 
 Sandesh::ModuleContextMap Sandesh::module_context_;
 tbb::atomic<uint32_t> Sandesh::sandesh_send_ratelimit_;
+
 const char * Sandesh::SandeshRoleToString(SandeshRole::type role) {
     switch (role) {
     case SandeshRole::Generator:
@@ -165,7 +167,7 @@ void Sandesh::RecordPort(const std::string& name, const std::string& module,
     myfifoss << module << "." << getppid() << "." << name << "_port";
     std::string myfifo = (boost::filesystem::temp_directory_path() / myfifoss.str()).string();
 
-    std::ofstream temp_file(myfifo);
+    std::ofstream temp_file(myfifo.c_str());
     if (temp_file) {
         SANDESH_LOG(INFO, "SANDESH: Write " << name << "_port " << port <<
                           "TO : " << myfifo);
